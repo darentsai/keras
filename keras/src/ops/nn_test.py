@@ -149,8 +149,8 @@ class NNOpsDynamicShapeTest(testing.TestCase):
         self.assertEqual(knn.celu(x).shape, (None, 2, 3))
 
     def test_glu(self):
-        x = KerasTensor([None, 2, 3])
-        self.assertEqual(knn.glu(x).shape, (None, 2, 3))
+        x = KerasTensor([None, 2, 4])
+        self.assertEqual(knn.glu(x).shape, (None, 2, 2))
 
     def test_tanh_shrink(self):
         x = KerasTensor([None, 2, 3])
@@ -851,8 +851,8 @@ class NNOpsStaticShapeTest(testing.TestCase):
         self.assertEqual(knn.celu(x).shape, (1, 2, 3))
 
     def test_glu(self):
-        x = KerasTensor([1, 2, 3])
-        self.assertEqual(knn.glu(x).shape, (1, 2, 3))
+        x = KerasTensor([1, 2, 4])
+        self.assertEqual(knn.glu(x).shape, (1, 2, 2))
 
     def test_tanh_shrink(self):
         x = KerasTensor([1, 2, 3])
@@ -1324,6 +1324,40 @@ class NNOpsStaticShapeTest(testing.TestCase):
 
 
 class NNOpsCorrectnessTest(testing.TestCase):
+    @pytest.mark.skipif(backend.backend() != "jax", reason="JAX only")
+    def test_dot_product_attention_inside_scan(self):
+        import jax
+
+        try:
+            if jax.devices()[0].platform != "tpu":
+                self.skipTest("TPU-specific test")
+        except:
+            self.skipTest("TPU-specific test")
+
+        import jax.numpy as jnp
+
+        def attention_scan_body(carry, x):
+            query, key, value = x
+            # dot_product_attention expects 4D inputs (B, H, S, D)
+            query = jnp.expand_dims(query, axis=0)
+            key = jnp.expand_dims(key, axis=0)
+            value = jnp.expand_dims(value, axis=0)
+
+            # Use a mask to trigger the issue
+            mask = jnp.ones((1, 4, 8), dtype="bool")
+            out = knn.dot_product_attention(query, key, value, mask=mask)
+
+            out = jnp.squeeze(out, axis=0)
+            return carry, out
+
+        query = jnp.ones((2, 1, 4, 8))
+        key = jnp.ones((2, 1, 4, 8))
+        value = jnp.ones((2, 1, 4, 8))
+
+        # Scan over the first dimension
+        _, out = jax.lax.scan(attention_scan_body, None, (query, key, value))
+        self.assertEqual(out.shape, (2, 1, 4, 8))
+
     def test_relu(self):
         x = np.array([-1, 0, 1, 2, 3], dtype=np.float32)
         self.assertAllClose(knn.relu(x), [0, 0, 1, 2, 3])
@@ -1715,7 +1749,7 @@ class NNOpsCorrectnessTest(testing.TestCase):
             dilation_rate=1,
             groups=1,
         )
-        self.assertAllClose(outputs, expected)
+        self.assertAllClose(outputs, expected, tpu_atol=1e-2, tpu_rtol=1e-2)
 
     @parameterized.product(strides=(1, 2), dilation_rate=(1, (2, 1)))
     def test_conv_2d_group_2(self, strides, dilation_rate):
@@ -1777,7 +1811,14 @@ class NNOpsCorrectnessTest(testing.TestCase):
             dilation_rate=1,
             groups=1,
         )
-        self.assertAllClose(outputs, expected, rtol=1e-5, atol=1e-5)
+        self.assertAllClose(
+            outputs,
+            expected,
+            rtol=1e-5,
+            atol=1e-5,
+            tpu_atol=1e-2,
+            tpu_rtol=1e-2,
+        )
 
         # Test for tracing error on tensorflow backend.
         if backend.backend() == "tensorflow":
@@ -1790,7 +1831,14 @@ class NNOpsCorrectnessTest(testing.TestCase):
                 )
 
             outputs = conv(inputs_3d)
-            self.assertAllClose(outputs, expected, rtol=1e-5, atol=1e-5)
+            self.assertAllClose(
+                outputs,
+                expected,
+                rtol=1e-5,
+                atol=1e-5,
+                tpu_atol=1e-2,
+                tpu_rtol=1e-2,
+            )
 
     @parameterized.product(
         strides=(1, (1, 1), (2, 2)),
@@ -1829,7 +1877,7 @@ class NNOpsCorrectnessTest(testing.TestCase):
             data_format=backend.config.image_data_format(),
             dilation_rate=dilation_rate,
         )
-        self.assertAllClose(outputs, expected)
+        self.assertAllClose(outputs, expected, tpu_atol=1e-2, tpu_rtol=1e-2)
 
     @parameterized.product(
         strides=(1, 2),
@@ -1881,7 +1929,7 @@ class NNOpsCorrectnessTest(testing.TestCase):
             dilation_rate=dilation_rate,
             groups=1,
         )
-        self.assertAllClose(outputs, expected)
+        self.assertAllClose(outputs, expected, tpu_atol=1e-2, tpu_rtol=1e-2)
 
     @parameterized.product(padding=("valid", "same"))
     def test_conv_transpose_1d(self, padding):
@@ -2279,7 +2327,12 @@ class NNOpsCorrectnessTest(testing.TestCase):
         output_length = np.array([3, 2])
 
         result = knn.ctc_loss(labels, outputs, label_length, output_length)
-        self.assertAllClose(result, np.array([3.4411672, 1.91680186]))
+        self.assertAllClose(
+            result,
+            np.array([3.4411672, 1.91680186]),
+            tpu_atol=1e-2,
+            tpu_rtol=1e-2,
+        )
 
     def test_ctc_decode(self):
         inputs = np.array(
@@ -2439,19 +2492,20 @@ class NNOpsCorrectnessTest(testing.TestCase):
             mask = mask[None, None, ...]
             mask = np.tile(mask, (2, 4, 1, 1))
         if bias is not None:
-            if backend.backend() == "torch":
+            if backend.backend() in ("torch", "openvino"):
                 self.skipTest(
-                    "torch does not support `bias` with `dot_product_attention`"
+                    "torch and openvino do not support `bias` with "
+                    "`dot_product_attention`"
                 )
             bias = np.arange(math.prod(bias_shape), dtype=float).reshape(
                 bias_shape
             )
 
         if flash_attention:
-            if backend.backend() in ("tensorflow", "numpy"):
+            if backend.backend() in ("tensorflow", "numpy", "openvino"):
                 self.skipTest(
-                    "Flash attention is not supported in tensorflow and numpy "
-                    "backends."
+                    "Flash attention is not supported in tensorflow, numpy, "
+                    "and openvino backends."
                 )
             elif backend.backend() == "torch":
                 import torch
@@ -2733,9 +2787,6 @@ class NNOpsDtypeTest(testing.TestCase):
     def test_glu(self, dtype):
         import jax.nn as jnn
         import jax.numpy as jnp
-
-        if dtype == "bfloat16":
-            self.skipTest("Weirdness with numpy")
 
         x = knp.ones((2), dtype=dtype)
         x_jax = jnp.ones((2), dtype=dtype)
@@ -3254,3 +3305,196 @@ class NNOpsBehaviorTest(testing.TestCase):
             UserWarning, r"You passed `rms_scaling=True`, which is deprecated"
         ):
             knn.layer_normalization(x, rms_scaling=True)
+
+    def test_unfold(self):
+        if keras.config.backend() in ["openvino"]:
+            pytest.skip("Backend does not support unfold operation")
+        # test 1 kernel_size=2
+        x = ops.arange(8, dtype="float32")
+        x = ops.reshape(x, [1, 1, 2, 4])
+        unfold_result = knn.unfold(x, 2)
+        except_result = ops.convert_to_tensor(
+            [
+                [
+                    [0.0, 1.0, 2.0],
+                    [1.0, 2.0, 3.0],
+                    [4.0, 5.0, 6.0],
+                    [5.0, 6.0, 7.0],
+                ]
+            ]
+        )
+        self.assertAllClose(unfold_result, except_result)
+
+        # test 2 kernel_size=[2,4]
+        x = ops.arange(16, dtype="float32")
+        x = ops.reshape(x, [1, 1, 4, 4])
+        unfold_result = knn.unfold(x, [2, 4])
+        except_result = ops.convert_to_tensor(
+            [
+                [
+                    [0.0, 4.0, 8.0],
+                    [1.0, 5.0, 9.0],
+                    [2.0, 6.0, 10.0],
+                    [3.0, 7.0, 11.0],
+                    [4.0, 8.0, 12.0],
+                    [5.0, 9.0, 13.0],
+                    [6.0, 10.0, 14.0],
+                    [7.0, 11.0, 15.0],
+                ]
+            ],
+            dtype="float32",
+        )
+        self.assertAllClose(unfold_result, except_result)
+
+        # test 3 kernel_size=[3,2],stride=[3,2]
+        x = ops.arange(12, dtype="float32")
+        x = ops.reshape(x, [1, 1, 3, 4])
+        unfold_result = knn.unfold(x, [3, 2], stride=[3, 2])
+        except_result = ops.convert_to_tensor(
+            [
+                [
+                    [0.0, 2.0],
+                    [1.0, 3.0],
+                    [4.0, 6.0],
+                    [5.0, 7.0],
+                    [8.0, 10.0],
+                    [9.0, 11.0],
+                ]
+            ]
+        )
+        self.assertAllClose(unfold_result, except_result)
+
+        # test 4 kernel_size=2,dilation=2,stride=2
+        x = ops.arange(16, dtype="float32")
+        x = ops.reshape(x, [1, 1, 4, 4])
+        unfold_result = knn.unfold(x, 2, 2, stride=2)
+        except_result = ops.convert_to_tensor([0, 2, 8, 10], dtype="float32")
+        except_result = ops.reshape(except_result, [1, 4, 1])
+        self.assertAllClose(unfold_result, except_result)
+
+        # test 5 kernel_size=2,padding=1
+        x = ops.arange(4, dtype="float32")
+        x = ops.reshape(x, [1, 1, 2, 2])
+        unfold_result = knn.unfold(x, 1, padding=1)
+        except_result = ops.convert_to_tensor(
+            [
+                [
+                    [
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                        0.0,
+                        0.0,
+                        2.0,
+                        3.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ]
+                ]
+            ]
+        )
+        self.assertAllClose(unfold_result, except_result)
+
+        # test 6 multi channal and kernel_size=2
+        x = ops.arange(8, dtype="float32")
+        x = ops.reshape(x, [1, 2, 2, 2])
+        unfold_result = knn.unfold(x, 2)
+        except_result = ops.convert_to_tensor(
+            [[[0.0], [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0]]]
+        )
+        self.assertAllClose(unfold_result, except_result)
+
+        # test 7 multi channal and kernel_size=[2,3]
+        x = ops.arange(12, dtype="float32")
+        x = ops.reshape(x, [1, 2, 2, 3])
+        unfold_result = knn.unfold(x, [2, 3])
+        except_result = ops.convert_to_tensor(
+            [
+                [
+                    [0.0],
+                    [1.0],
+                    [2.0],
+                    [3.0],
+                    [4.0],
+                    [5.0],
+                    [6.0],
+                    [7.0],
+                    [8.0],
+                    [9.0],
+                    [10.0],
+                    [11.0],
+                ]
+            ]
+        )
+        self.assertAllClose(unfold_result, except_result)
+
+        # test 8 multi channal and kernel_size=[2,3],stride=[2,3]
+        x = ops.arange(12, dtype="float32")
+        x = ops.reshape(x, [1, 2, 2, 3])
+        unfold_result = knn.unfold(x, [2, 3], stride=[2, 3])
+        except_result = ops.convert_to_tensor(
+            [
+                [
+                    [0.0],
+                    [1.0],
+                    [2.0],
+                    [3.0],
+                    [4.0],
+                    [5.0],
+                    [6.0],
+                    [7.0],
+                    [8.0],
+                    [9.0],
+                    [10.0],
+                    [11.0],
+                ]
+            ]
+        )
+        self.assertAllClose(unfold_result, except_result)
+
+        # test 9 multi channal and kernel_size=2,dilation=2
+        x = ops.arange(32, dtype="float32")
+        x = ops.reshape(x, [1, 2, 4, 4])
+        unfold_result = knn.unfold(x, 2, dilation=2)
+        except_result = ops.convert_to_tensor(
+            [
+                [
+                    [0.0, 1.0, 4.0, 5.0],
+                    [2.0, 3.0, 6.0, 7.0],
+                    [8.0, 9.0, 12.0, 13.0],
+                    [10.0, 11.0, 14.0, 15.0],
+                    [16.0, 17.0, 20.0, 21.0],
+                    [18.0, 19.0, 22.0, 23.0],
+                    [24.0, 25.0, 28.0, 29.0],
+                    [26.0, 27.0, 30.0, 31.0],
+                ]
+            ]
+        )
+        self.assertAllClose(unfold_result, except_result)
+
+        # test 10 multi channal and kernel_size=2,padding=1
+        x = ops.arange(8, dtype="float32")
+        x = ops.reshape(x, [1, 2, 2, 2])
+        unfold_result = knn.unfold(x, 2, padding=1)
+        except_result = ops.convert_to_tensor(
+            [
+                [
+                    [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 3.0],
+                    [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 3.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 2.0, 3.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0, 4.0, 5.0, 0.0, 6.0, 7.0],
+                    [0.0, 0.0, 0.0, 4.0, 5.0, 0.0, 6.0, 7.0, 0.0],
+                    [0.0, 4.0, 5.0, 0.0, 6.0, 7.0, 0.0, 0.0, 0.0],
+                    [4.0, 5.0, 0.0, 6.0, 7.0, 0.0, 0.0, 0.0, 0.0],
+                ]
+            ]
+        )
+        self.assertAllClose(unfold_result, except_result)

@@ -77,9 +77,15 @@ def get_model(type="sequential", input_shape=(10,), layer_list=None):
         "backends."
     ),
 )
-@pytest.mark.skipif(testing.jax_uses_gpu(), reason="Leads to core dumps on CI")
 @pytest.mark.skipif(
-    testing.tensorflow_uses_gpu(), reason="Leads to core dumps on CI"
+    testing.jax_uses_gpu()
+    or testing.tensorflow_uses_gpu()
+    or testing.torch_uses_gpu(),
+    reason="Fails on GPU",
+)
+@pytest.mark.skipif(
+    np.version.version.startswith("2."),
+    reason="ONNX export is currently incompatible with NumPy 2.0",
 )
 class ExportONNXTest(testing.TestCase):
     @parameterized.named_parameters(
@@ -247,7 +253,7 @@ class ExportONNXTest(testing.TestCase):
         }
         ort_session.run(None, ort_inputs)
 
-    @parameterized.named_parameters(named_product(opset_version=[None, 18]))
+    @parameterized.named_parameters(named_product(opset_version=[None, 17]))
     def test_export_with_opset_version(self, opset_version):
         import onnx as onnx_lib
 

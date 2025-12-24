@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from absl.testing import parameterized
 
 from keras.src import backend
@@ -398,7 +399,13 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
         )
 
         output_inverse = linalg.cholesky_inverse(factor, upper=upper)
-        self.assertAllClose(output_inverse, expected_inverse, atol=1e-5)
+        self.assertAllClose(
+            output_inverse,
+            expected_inverse,
+            atol=1e-5,
+            tpu_atol=1e-2,
+            tpu_rtol=1e-2,
+        )
 
     def test_det(self):
         x = np.random.rand(4, 3, 3)
@@ -410,6 +417,8 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
             linalg.det(x)
 
     def test_eig(self):
+        if testing.uses_tpu():
+            self.skipTest("Skipping test with JAX + TPU as it's not supported")
         x = np.random.rand(2, 3, 3)
         x = x @ x.transpose((0, 2, 1))
         w, v = map(ops.convert_to_numpy, linalg.eig(x))
@@ -585,11 +594,15 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
             ..., : s.shape[-1], :
         ]
         # High tolerance due to numerical instability
-        self.assertAllClose(x_reconstructed, x, atol=1e-3)
+        self.assertAllClose(
+            x_reconstructed, x, atol=1e-3, tpu_atol=1e-2, tpu_rtol=1e-2
+        )
 
         # Test `compute_uv=False`
         s_no_uv = linalg.svd(x, compute_uv=False)
-        self.assertAllClose(s_no_uv, s)
+        self.assertAllClose(
+            s_no_uv, s, atol=1e-5, rtol=1e-5, tpu_atol=1e-2, tpu_rtol=1e-2
+        )
 
     @parameterized.named_parameters(
         ("b_rank_1", 1, None),
@@ -607,7 +620,9 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
             b_symb = backend.KerasTensor((5, 4))
         out = linalg.lstsq(a, b, rcond=rcond)
         ref_out = np.linalg.lstsq(a, b, rcond=rcond)[0]
-        self.assertAllClose(out, ref_out, atol=1e-5)
+        self.assertAllClose(
+            out, ref_out, atol=1e-5, tpu_atol=1e-4, tpu_rtol=1e-4
+        )
 
         out_symb = linalg.lstsq(a_symb, b_symb)
         self.assertEqual(out_symb.shape, out.shape)
@@ -663,3 +678,50 @@ class QrOpTest(testing.TestCase):
         q, r = qr_op.call(test_input)
         self.assertEqual(q.shape, (10, 10))
         self.assertEqual(r.shape, (10, 10))
+
+    def test_jvp(self):
+        if backend.backend() in ["openvino", "numpy"]:
+            pytest.skip("Backend does not support jvp operation")
+        a1, a2 = ops.convert_to_tensor(0.1), ops.convert_to_tensor(0.2)
+        primals, tangents = linalg.jvp(backend.numpy.sin, (a1,), (a2,))
+        self.assertAllClose(primals, 0.0998, atol=1e-4)
+        self.assertAllClose(tangents, 0.1990, atol=1e-4)
+
+        def f(x):
+            return backend.numpy.sin(x), x**2
+
+        primals_out, tangents_out, aux = linalg.jvp(
+            f, (a1,), (a2,), has_aux=True
+        )
+        self.assertAllClose(primals_out, 0.0998, atol=1e-4)
+        self.assertAllClose(tangents_out, 0.1990, atol=1e-4)
+        self.assertAllClose(aux, 0.01, atol=1e-4)
+
+    def test_jvp_symbolic_has_aux_false(self):
+        primals = KerasTensor((None, 7))
+        tangents = KerasTensor((None, 7))
+
+        def fun(x):
+            # simple non-linear transformation
+            return ops.sin(x) + ops.cos(x)
+
+        primals_out, tangents_out = linalg.jvp(fun, (primals,), (tangents,))
+        # output shapes must match input shapes
+        self.assertEqual(primals_out.shape, primals.shape)
+        self.assertEqual(tangents_out.shape, tangents.shape)
+
+        """Symbolic JVP test – has_aux=True."""
+
+        def fun(x):
+            y = ops.exp(x)
+            aux = ops.mean(y, axis=-1, keepdims=True)  # auxiliary output
+            return y, aux
+
+        primals_out, tangents_out, aux = linalg.jvp(
+            fun, (primals,), (tangents,), has_aux=True
+        )
+        # main output shapes
+        self.assertEqual(primals_out.shape, primals.shape)
+        self.assertEqual(tangents_out.shape, tangents.shape)
+        # auxiliary shape: (batch, 1)
+        self.assertEqual(aux.shape, (None, 1))

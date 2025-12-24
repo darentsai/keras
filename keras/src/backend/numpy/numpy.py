@@ -294,6 +294,11 @@ def array(x, dtype=None):
     return convert_to_tensor(x, dtype=dtype)
 
 
+def view(x, dtype=None):
+    x = convert_to_tensor(x)
+    return x.view(dtype=dtype)
+
+
 def average(x, axis=None, weights=None):
     axis = standardize_axis_for_numpy(axis)
     x = convert_to_tensor(x)
@@ -607,6 +612,10 @@ def empty(shape, dtype=None):
     return np.empty(shape, dtype=dtype)
 
 
+def empty_like(x, dtype=None):
+    return np.empty_like(x, dtype=dtype)
+
+
 def equal(x1, x2):
     return np.equal(x1, x2)
 
@@ -745,6 +754,11 @@ def isposinf(x):
     return np.isposinf(x)
 
 
+def isreal(x):
+    x = convert_to_tensor(x)
+    return np.isreal(x)
+
+
 def kron(x1, x2):
     x1 = convert_to_tensor(x1)
     x2 = convert_to_tensor(x2)
@@ -757,6 +771,19 @@ def lcm(x1, x2):
     x2 = convert_to_tensor(x2)
     dtype = dtypes.result_type(x1.dtype, x2.dtype)
     return np.lcm(x1, x2).astype(dtype)
+
+
+def ldexp(x1, x2):
+    x1 = convert_to_tensor(x1)
+    x2 = convert_to_tensor(x2)
+    dtype = dtypes.result_type(x1.dtype, x2.dtype, float)
+
+    if standardize_dtype(x2.dtype) not in dtypes.INT_TYPES:
+        raise TypeError(
+            f"ldexp exponent must be an integer type. "
+            f"Received: x2 dtype={x2.dtype}"
+        )
+    return np.ldexp(x1, x2).astype(dtype)
 
 
 def less(x1, x2):
@@ -836,6 +863,13 @@ def logaddexp(x1, x2):
     x1 = x1.astype(dtype)
     x2 = x2.astype(dtype)
     return np.logaddexp(x1, x2)
+
+
+def logaddexp2(x1, x2):
+    x1 = convert_to_tensor(x1)
+    x2 = convert_to_tensor(x2)
+    dtype = dtypes.result_type(x1.dtype, x2.dtype, float)
+    return np.logaddexp2(x1, x2).astype(dtype)
 
 
 def logical_and(x1, x2):
@@ -1090,6 +1124,11 @@ def split(x, indices_or_sections, axis=0):
     return np.split(x, indices_or_sections, axis=axis)
 
 
+def array_split(x, indices_or_sections, axis=0):
+    axis = standardize_axis_for_numpy(axis)
+    return np.array_split(x, indices_or_sections, axis=axis)
+
+
 def stack(x, axis=0):
     axis = standardize_axis_for_numpy(axis)
     dtype_set = set([getattr(a, "dtype", type(a)) for a in x])
@@ -1165,8 +1204,10 @@ def trace(x, offset=0, axis1=0, axis2=1):
     axis2 = standardize_axis_for_numpy(axis2)
     x = convert_to_tensor(x)
     dtype = standardize_dtype(x.dtype)
-    if dtype not in ("int64", "uint32", "uint64"):
-        dtype = dtypes.result_type(dtype, "int32")
+    if dtype in ("bool", "int8", "int16"):
+        dtype = "int32"
+    elif dtype in ("uint8", "uint16"):
+        dtype = "uint32"
     return np.trace(x, offset=offset, axis1=axis1, axis2=axis2, dtype=dtype)
 
 
@@ -1320,6 +1361,23 @@ def squeeze(x, axis=None):
 def transpose(x, axes=None):
     axes = tuple(axes) if isinstance(axes, list) else axes
     return np.transpose(x, axes=axes)
+
+
+def trapezoid(y, x=None, dx=1.0, axis=-1):
+    y = convert_to_tensor(y)
+    result_dtype = dtypes.result_type(y.dtype, float)
+    if x is not None:
+        x = convert_to_tensor(x)
+    dx = convert_to_tensor(dx)
+    return np.trapezoid(y, x, dx=dx, axis=axis).astype(result_dtype)
+
+
+def vander(x, N=None, increasing=False):
+    x = convert_to_tensor(x)
+    result_dtype = dtypes.result_type(x.dtype)
+    compute_dtype = dtypes.result_type(x.dtype, config.floatx())
+    x = x.astype(compute_dtype)
+    return np.vander(x, N=N, increasing=increasing).astype(result_dtype)
 
 
 def var(x, axis=None, keepdims=False):
