@@ -378,7 +378,10 @@ class MultiHeadAttentionRBF(Layer):
         if self._attention_axes is None:
             self._attention_axes = tuple(range(1, rank - 2))
         else:
-            self._attention_axes = tuple(self._attention_axes)
+            self._attention_axes = tuple(
+                axis if axis >= 0 else (rank - 1) + axis
+                for axis in self._attention_axes
+            )
         (
             self._dot_product_equation,
             self._combine_equation,
@@ -452,10 +455,10 @@ class MultiHeadAttentionRBF(Layer):
         use_dot_product_attention = not (
             self._dropout > 0.0
             or return_attention_scores
-            or rbf
             or (len(query.shape) != 4)
+            or rbf
         )
-        
+
         if use_dot_product_attention:
             if attention_mask is not None:
                 # Ensure attention_mask has the correct shape for broadcasting
@@ -483,7 +486,6 @@ class MultiHeadAttentionRBF(Layer):
             )
             return attention_output, None
 
-        
         # Default behavior without flash attention, with explicit attention scores
         query = ops.multiply(
             query, ops.cast(self._inverse_sqrt_key_dim, query.dtype)
@@ -491,7 +493,7 @@ class MultiHeadAttentionRBF(Layer):
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = ops.einsum(self._dot_product_equation, key, query)   # (B, N, T, S)
-        
+
         if rbf:
             key_2norm = ops.sum(ops.square(key), axis = -1, keepdims = True)    # (B, S, N, D=1)
             key_2norm = ops.multiply(
@@ -499,7 +501,7 @@ class MultiHeadAttentionRBF(Layer):
             )
             key_2norm = ops.transpose(key_2norm, [0, 2, 3, 1])                  # (B, N, T=1, S)
             attention_scores -= key_2norm
-        
+
         # Apply the mask using the custom masked softmax
         attention_scores = self._masked_softmax(
             attention_scores, attention_mask
@@ -550,7 +552,7 @@ class MultiHeadAttentionRBF(Layer):
             key_mask=key_mask,
             attention_mask=attention_mask,
             use_causal_mask=use_causal_mask,
-            rbf=rbf
+            rbf=rbf,
         )
         #   N = `num_attention_heads`
         #   H = `size_per_head`
@@ -591,7 +593,7 @@ class MultiHeadAttentionRBF(Layer):
         key_mask=None,
         attention_mask=None,
         use_causal_mask=False,
-        rbf=False
+        rbf=False,
     ):
         """Computes the attention mask, using the Keras masks of the inputs.
 
